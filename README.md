@@ -38,7 +38,7 @@ How to Run the Code
 	2.	Set the working directory to this repository
 	3.	Run the main script:
   
-  source("run_simulation.R")
+  source("robust_anova_simulation.Rmd")
   
   This will:
 	•	Run Type I error simulations
@@ -46,21 +46,7 @@ How to Run the Code
 	•	Save results automatically
 
 Repository Structure
-	•	run_simulation.R → Main script to reproduce all results
-	•	simulate_type1.R → Functions for Type I error simulations
-	•	simulate_power.R → Functions for power simulations
-	•	helper_functions.R → Supporting functions
-
-Folders:
-	•	/data → Stores simulation results
-	•	/plots → Contains generated figures
-	•	/results → Scripts for tables and visualizations
-
-
-Output
-	•	Type I error results → /data/type1_results.csv
-	•	Power results → /data/power_results.csv
-	•	Plots are saved in /plots
+• robust_anova_simulation.Rmd → Contains the full simulation code, including data generation, Type I error analysis, and power analysis
 
 
 Reproducibility
