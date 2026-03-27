@@ -1,0 +1,782 @@
+---
+title: "Comparing Robust ANOVA Methods under Heteroscedasticity: A simulation study of Welch, Brown-Forsythe, and Permutation Tests"
+author: "The Vobian"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+```{r}
+#library(car) #for Welch's and Brown-Forsythe. This package "car" is for for quality of variances.
+#I later installed the package "onewaytests" which performs a heteroscedastic robust test for equality of means
+# Install once (you can add to your setup chunk)
+# install.packages("onewaytests")
+
+
+```
+
+```{r}
+# running with Rcpp
+# Load necessary packages
+
+library(tidyverse)#dplyr,ggplot2,tidyr
+library(onewaytests) # for Brown-Forsythe (means) and Welch
+library(Rcpp) # linking R with c++ code for faster speed
+library(ggthemes) # for better themes in ggplot
+
+```
+
+```{r}
+Rcpp::sourceCpp("f_test.cpp")
+```
+
+
+
+```{r}
+
+set.seed(123)# for keeping the random numbers generated same each time the code is run
+#let's generate an unbalanced, heteroscedastic normal data n(10,20,30) with variance (1,4,9)
+sample_1<-rnorm(10, mean=0,sd=sqrt(1)) #small sample with low varance
+sample_2<-rnorm(20, mean=0,sd=sqrt(4)) #medium sample with medium varance
+sample_3<-rnorm(30, mean=0,sd=sqrt(9)) #large sample with high varance
+
+#dataframe to handle the samples above
+sample_df<-data.frame(
+  value=c(sample_1, sample_2, sample_3),
+  samples = factor(rep(c("1","2","3"), times=c(10,20,30)))
+)
+sample_df
+
+```
+
+
+```{r}
+#Boxplot to visualize group distribution. this confirms heteroscedascity (unequal variances)
+boxplot(value ~ samples, data = sample_df,
+        main = "Boxplot of Value by samples",
+        xlab = "Sample",
+        ylab = "Value",
+        col = c("skyblue3", "red3", "green3"),
+        border = "darkgray")
+```
+
+
+
+```{r}
+#Test 1: Classical ANOVA
+classic<-aov(value~samples,data = sample_df)
+summary(classic)
+cat("Classic ANOVA p-value:",summary(classic)[[1]][["Pr(>F)"]][1],"\n")
+```
+
+
+```{r}
+#Test 2: Welch's test: adjustments for unequal variances
+Welch<-oneway.test(value~samples, data = sample_df, var.equal = FALSE)
+summary(Welch)
+Welch$statistic
+cat("Welch summary is as follows:\n","Welch Statistic:",Welch$statistic,"\n",
+    "Welch Parameter:",Welch$parameter,"\n","Welch P-value:",Welch$p.value,"\n",
+    "Welch Method:",Welch$method,"\n","Welch data.name:",Welch$data.name,"\n"
+    )
+
+```
+
+
+```{r}
+#Test 3: Brown-forsythe mean test
+# Single run example (replace your current bf line)
+bf_result <- bf.test(value ~ samples, data = sample_df)
+
+# Extract just the p-value
+p_bf <- bf_result$p.value
+# Extract just the test statistic
+stat_bf <- bf_result$statistic
+cat("Brown-Forsythe Statistic:", stat_bf, "\n")
+cat("Brown-Forsythe P-value:", p_bf, "\n")
+```
+
+
+```{r}
+#Test 4: Permutation test function for the Normal distribution
+n_perm <- 499
+
+obs_F <- summary(aov(value ~ samples, data = sample_df))[[1]][["F value"]][1]
+
+perm_F <- replicate(n_perm, {
+  shuffled <- sample(sample_df$value)
+  df_perm <- data.frame(value = shuffled,
+                        samples = sample_df$samples)
+  anova(lm(value ~ samples, data = df_perm))[1, "F value"]
+})
+
+perm_p <- (sum(perm_F >= obs_F) + 1) / (n_perm + 1)
+obs_F #print the F statistic
+perm_F #Print the different permutations
+perm_p #print the p value
+```
+
+
+```{r}
+#p value for all four tests
+cat("Classic ANOVA p-value:",summary(classic)[[1]]$Pr[1],"\n",
+"Welch P-value:",Welch$p.value,"\n",
+"Brown-Forsythe P-value is :",p_bf,"\n",
+"Permutation P-value is:",perm_p,"\n")
+```
+
+
+```{r}
+#visualizing the Permutation distribution
+perm_dist<-replicate(n_perm,{summary(aov(sample(value)~samples, data = sample_df))[[1]]$F[1]})
+obs_F<-summary(aov(value~samples, data = sample_df))[[1]]$F[1]
+hist(perm_dist,breaks=30, main="Permutation Distribution of F", xlab="F-Statistic", col="lightblue2")
+abline(v=obs_F, col="red",lwd=2)
+legend("topright","Observed F", col="red", lwd = 2)
+```
+
+
+
+
+```{r}
+# Function for handling p value for the 4 ANOVA methods with normal distribution
+# using Rcpp
+set.seed(123)
+
+run_tests_fast <- function(values, groups) {
+  # Create a small temp data frame ONLY for the tests that require it
+  # This is still much faster than creating it 100 times in the permutation loop
+  df_tmp <- data.frame(v = values, g = as.factor(groups))
+  
+  # 1. Classic ANOVA
+  p_classic <- summary(aov(v ~ g, data = df_tmp))[[1]][["Pr(>F)"]][1]
+  
+  # 2. Welch's ANOVA
+  p_welch <- oneway.test(v ~ g, data = df_tmp, var.equal = FALSE)$p.value
+  
+  # 3. Brown-Forsythe (The part that caused the error)
+  p_bf <- {
+    # bf.test is "chatty", so we capture output to keep the console clean
+    tmp_out <- capture.output(
+      res <- onewaytests::bf.test(v ~ g, data = df_tmp, verbose = FALSE)
+    )
+    res$p.value
+  }
+  
+  # 4. FAST Permutation using Rcpp (This is the real speed booster)
+  n_perm <- 499 
+  g_int <- as.integer(as.factor(groups))
+  obs_F <- fast_f_stat(values, g_int)
+  
+  # We use the raw 'values' vector here for maximum speed
+  perm_Fs <- replicate(n_perm, {
+    fast_f_stat(sample(values), g_int)
+  })
+  
+  p_perm <- (sum(perm_Fs >= obs_F) + 1) / (n_perm + 1)
+  
+  return(c(p_classic, p_welch, p_bf, p_perm))
+}
+
+
+```
+
+
+```{r}
+# using rcpp for faster simulation results
+
+simulate_type1_fast <- function(n1, n2, n3, sd1, sd2, sd3, dist = "normal", n_sim = 5000) {
+  # Pre-allocate matrix for speed
+  p_vals <- matrix(NA, nrow = n_sim, ncol = 4)
+  groups <- c(rep(1, n1), rep(2, n2), rep(3, n3)) # Groups as integers for Rcpp
+  
+  cat("Starting simulation for", dist, "distribution...\n")
+  
+  for (i in 1:n_sim) {
+    # 1. Generate Data
+    if (dist == "normal") {
+      s1 <- rnorm(n1, mean = 0, sd = sd1)
+      s2 <- rnorm(n2, mean = 0, sd = sd2)
+      s3 <- rnorm(n3, mean = 0, sd = sd3)
+      
+    } else if (dist == "lognormal") {
+      target_mean <- 5 
+      # Calculate mu (meanlog) so all groups have the same expected mean
+      mu1 <- log(target_mean) - (sd1^2)/2
+      mu2 <- log(target_mean) - (sd2^2)/2
+      mu3 <- log(target_mean) - (sd3^2)/2
+      
+      s1 <- rlnorm(n1, meanlog = mu1, sdlog = sd1)
+      s2 <- rlnorm(n2, meanlog = mu2, sdlog = sd2)
+      s3 <- rlnorm(n3, meanlog = mu3, sdlog = sd3)
+      
+    } else if (dist == "t") {
+      # Scale t-distribution (df=3) by the desired SD
+      s1 <- (rt(n1, df = 3) / sqrt(3)) * sd1
+      s2 <- (rt(n2, df = 3) / sqrt(3)) * sd2
+      s3 <- (rt(n3, df = 3) / sqrt(3)) * sd3
+    }
+    
+    values <- c(s1, s2, s3)
+    
+    # 2. Run the tests using the fast_f_stat (Rcpp) and updated run_tests_fast
+    p_vals[i, ] <- run_tests_fast(values, groups)
+    
+    # 3. Progress tracking
+    if(i %% 500 == 0) cat("  Progress:", (i/n_sim)*100, "%\n")
+  }
+  
+  colnames(p_vals) <- c("Classic", "Welch", "Brown-Forsythe", "Permutation")
+  
+  # Calculate Type 1 error rates
+  type1_error_rates <- colMeans(p_vals < 0.05, na.rm = TRUE)
+  
+  return(list(type1_error_rates = type1_error_rates, p_values = p_vals))
+}
+
+
+# Run simulations for normal
+type1_balanced_equal_n <- simulate_type1_fast(20, 20, 20, sqrt(1), sqrt(1), sqrt(1), dist = "normal")
+type1_unbalanced_unequal_n <- simulate_type1_fast(10, 20, 30, sqrt(1), sqrt(4), sqrt(9),dist = "normal")
+type1_balanced_unequal_n <-simulate_type1_fast(15, 15, 15, sqrt(1), sqrt(4), sqrt(9),dist = "normal")
+type1_unbalanced_equal_n <- simulate_type1_fast(5, 10, 15, sqrt(1), sqrt(1), sqrt(1),dist = "normal")
+
+# Measure execution time
+#execution_time <- system.time({
+ # type1_balanced_equal <- simulate_type1(20, 20, 20, sqrt(1), sqrt(1), sqrt(1))
+  #type1_unbalanced_hetero <- simulate_type1(10, 20, 30, sqrt(1), sqrt(4), sqrt(9))
+  #type1_balanced_hetero <- simulate_type1(15, 15, 15, sqrt(1), sqrt(4), sqrt(9))
+  #type1_unbalanced_equal <- simulate_type1(5, 10, 15, sqrt(1), sqrt(1), sqrt(1))})
+  
+# Combine results for normal
+results_n <- data.frame(
+ Scenario = c("Balanced Equal Var","Unbalanced Unequal Var","Balanced Unequal Var","Unbalanced Equal Var"),
+  rbind(type1_balanced_equal_n$type1_error_rates,type1_unbalanced_unequal_n$type1_error_rates,
+        type1_balanced_unequal_n$type1_error_rates,type1_unbalanced_equal_n$type1_error_rates)
+)
+
+#fixing columns names
+colnames(results_n)[2:5] <- c("Classic",
+                              "Welch",
+                              "Brown-Forsythe",
+                              "Permutation")
+cat("The type1 error rates for Normal are as follows\n")
+print(results_n)
+#cat("\nTotal run time:\n")
+#print(execution_time)
+
+#making sure type one error rates is ready for plotting
+type1_errors1 <- pivot_longer(
+  results_n,
+  cols = c("Classic", "Welch", "Brown-Forsythe", "Permutation"),
+  names_to = "Method",
+  values_to = "ErrorRate1"
+)
+# bars should reflect the given order
+type1_errors1$Method <- factor(type1_errors1$Method,
+                               levels = c("Classic", "Welch", "Brown-Forsythe", "Permutation"))
+
+# names under bars should match the order
+type1_errors1$Scenario <- factor(
+  type1_errors1$Scenario,
+  levels = c("Balanced Equal Var","Unbalanced Unequal Var","Balanced Unequal Var","Unbalanced Equal Var")
+)
+
+```
+
+
+```{r}
+# Run simulations for lognormal
+type1_balanced_equal_ln <- simulate_type1_fast(20, 20, 20, sqrt(1), sqrt(1), sqrt(1), dist = "lognormal")
+type1_unbalanced_unequal_ln <- simulate_type1_fast(10, 20, 30, sqrt(0.5), sqrt(1), sqrt(1.5),dist = "lognormal")
+type1_balanced_unequal_ln <- simulate_type1_fast(15, 15, 15, sqrt(0.5), sqrt(1), sqrt(1.5),dist = "lognormal")
+type1_unbalanced_equal_ln <- simulate_type1_fast(5, 10, 15, sqrt(1), sqrt(1), sqrt(1),dist = "lognormal")
+
+# Combine results for lognormal
+results_ln <- data.frame(
+   Scenario = c("Balanced Equal Var","Unbalanced Unequal Var","Balanced Unequal Var","Unbalanced Equal Var"),
+   
+  rbind(type1_balanced_equal_ln$type1_error_rates,type1_unbalanced_unequal_ln$type1_error_rates,
+        type1_balanced_unequal_ln$type1_error_rates,type1_unbalanced_equal_ln$type1_error_rates)
+)
+#fixing columns names
+colnames(results_ln)[2:5] <- c("Classic",
+                              "Welch",
+                              "Brown-Forsythe",
+                              "Permutation")
+cat("The type1 error rates  for Lognormal are as follows\n")
+print(results_ln)
+
+#making sure type one error rates is ready for plotting
+type1_errors2 <- pivot_longer(
+  results_ln,
+  cols = c("Classic", "Welch", "Brown-Forsythe", "Permutation"),
+  names_to = "Method",
+  values_to = "ErrorRate2"
+)
+# bars should reflect the given order
+
+type1_errors2$Method <- factor(type1_errors2$Method,
+                               levels = c("Classic", "Welch", "Brown-Forsythe", "Permutation"))
+
+
+# names under bars should match the order
+type1_errors2$Scenario <- factor(
+  type1_errors2$Scenario,
+  levels = c("Balanced Equal Var","Unbalanced Unequal Var","Balanced Unequal Var","Unbalanced Equal Var")
+)
+
+```
+
+
+```{r}
+# Run simulations for t
+type1_balanced_equal_t <- simulate_type1_fast(20, 20, 20, sqrt(1), sqrt(1), sqrt(1), dist = "t")
+type1_unbalanced_unequal_t <- simulate_type1_fast(10, 20, 30, sqrt(1), sqrt(4), sqrt(9),dist = "t")
+type1_balanced_unequal_t <- simulate_type1_fast(15, 15, 15, sqrt(1), sqrt(4), sqrt(9),dist = "t")
+type1_unbalanced_equal_t <- simulate_type1_fast(5, 10, 15, sqrt(1), sqrt(1), sqrt(1),dist = "t")
+# Combine results for t
+results_t <- data.frame(
+   Scenario = c("Balanced Equal Var","Unbalanced Unequal Var","Balanced Unequal Var","Unbalanced Equal Var"),
+   
+  rbind(type1_balanced_equal_t$type1_error_rates,type1_unbalanced_unequal_t$type1_error_rates,
+        type1_balanced_unequal_t$type1_error_rates,type1_unbalanced_equal_t$type1_error_rates)
+)
+#fixing columns names
+colnames(results_t)[2:5] <- c("Classic",
+                              "Welch",
+                              "Brown-Forsythe",
+                              "Permutation")
+cat("The type1 error rates  for t are as follows\n")
+print(results_t)
+
+#making sure type one error rates is ready for plotting
+type1_errors3 <- pivot_longer(
+  results_t,
+  cols = c("Classic", "Welch", "Brown-Forsythe", "Permutation"),
+  names_to = "Method",
+  values_to = "ErrorRate3"
+)
+# bars should reflect the given order
+type1_errors3$Method <- factor(type1_errors3$Method,
+                               levels = c("Classic", "Welch", "Brown-Forsythe", "Permutation"))
+# names under bars should match the order
+type1_errors3$Scenario <- factor(
+  type1_errors3$Scenario,
+  levels = c("Balanced Equal Var","Unbalanced Unequal Var","Balanced Unequal Var","Unbalanced Equal Var")
+)
+```
+
+ 
+
+```{r}
+#creating a type1error plot for the Normal, lognormal and t
+
+# Plot1 for normal
+plot1<-ggplot(type1_errors1, aes(x = Scenario, y = ErrorRate1, fill = Method)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.9)) +
+  geom_hline(yintercept = 0.05, linetype = "dashed", color = "red", size = 1, ) +
+  annotate(geom = "label",x=0.8,y=0.05+0.005,label="Nominal value=0.05", color="red", size=3)+
+  labs(title = "Comparison of Type I Error Rates for normal",
+       subtitle = "Across ANOVA Methods Under Different Conditions",
+       y = "Type I Error Rate", x = "Design Scenario") +
+  scale_y_continuous(
+    limits = c(0, 0.10),                # Forces the axis to stay between 0 and 0.10
+    breaks = seq(0, 0.10, by = 0.01),   # Adds a tick mark every 1%
+    expand = expansion(mult = c(0, 0.1)) # Removes the gap between bars and the x-axis
+  ) +
+ 
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5, size = 9, color="blue3",vjust = 1),
+        plot.title = element_text(face = "bold", size=16, hjust = 0.5),
+        plot.subtitle = element_text(size = 14, hjust=0.5),
+        axis.title.x = element_text(size=16),
+        axis.title.y = element_text(size=16),
+        legend.position = "top")
+ggsave("type1error_normal.tiff",plot1)
+plot1
+
+
+#plot 2 for lognormal
+plot2<-ggplot(type1_errors2, aes(x = Scenario, y = ErrorRate2, fill = Method)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.9)) +
+  geom_hline(yintercept = 0.05, linetype = "dashed", color = "red", size = 1) +
+  annotate(geom = "label",x=0.8,y=0.05+0.004,label="Nominal value=0.05", color="red", size=3)+
+  labs(title = "Comparison of Type I Error Rates for Lognormal",
+       subtitle = "Across ANOVA Methods Under Different Conditions",
+       y = "Type I Error Rate", x = "Design Scenario") +
+  scale_y_continuous(
+    limits = c(0, 0.10),                # Forces the axis to stay between 0 and 0.10
+    breaks = seq(0, 0.10, by = 0.01),   # Adds a tick mark every 1%
+    expand = expansion(mult = c(0, 0.1)) # Removes the gap between bars and the x-axis
+  ) +
+  theme_minimal() +
+   theme(axis.text.x = element_text(angle = 0, hjust = 0.5, size = 9, color="blue3",vjust = 1),
+        plot.title = element_text(face = "bold", size=16, hjust = 0.5),
+        plot.subtitle = element_text(size = 14, hjust=0.5),
+        axis.title.x = element_text(size=16),
+        axis.title.y = element_text(size=16),
+        legend.position = "top")
+ggsave("type1error_lognormal.tiff",plot2)
+plot2 
+
+
+#plot 3 for t distribution
+plot3<-ggplot(type1_errors3, aes(x = Scenario, y = ErrorRate3, fill = Method)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.9)) +
+  geom_hline(yintercept = 0.05, linetype = "dashed", color = "red", size = 1) +
+  annotate(geom = "label",x=0.8,y=0.05+0.004,label="Nominal value=0.05", color="red", size=3)+
+  labs(title = "Comparison of Type I Error Rates for t",
+       subtitle = "Across ANOVA Methods Under Different Conditions",
+       y = "Type I Error Rate", x = "Design Scenario") +
+  scale_y_continuous(
+    limits = c(0, 0.10),                # Forces the axis to stay between 0 and 0.10
+    breaks = seq(0, 0.10, by = 0.01),   # Adds a tick mark every 1%
+    expand = expansion(mult = c(0, 0.1)) # Removes the gap between bars and the x-axis
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5, size = 9, color="blue3",vjust = 1),
+        plot.title = element_text(face = "bold", size=16, hjust = 0.5),
+        plot.subtitle = element_text(size = 14, hjust=0.5),
+        axis.title.x = element_text(size=16),
+        axis.title.y = element_text(size=16),
+        legend.position = "top")
+ggsave("type1error_t.tiff",plot3)
+
+plot3 
+```
+ 
+
+#Power analysis simulation 
+
+
+
+```{r}
+#Power analysis simulation 
+
+# General simulation function for power analysis
+simulate_power_fast <- function(n1, n2, n3, sd1, sd2, sd3, means, dist = "normal", n_sim = 5000) {
+  # Pre-allocate matrix and set up groups
+  p_vals <- matrix(NA, nrow = n_sim, ncol = 4)
+  groups <- c(rep(1, n1), rep(2, n2), rep(3, n3))
+  
+  cat("Simulating Power for", dist, "| n_sim =", n_sim, "\n")
+  
+  for (i in 1:n_sim) {
+    # 1. Data Generation (with different means)
+    if (dist == "normal") {
+      s1 <- rnorm(n1, mean = means[1], sd = sd1)
+      s2 <- rnorm(n2, mean = means[2], sd = sd2)
+      s3 <- rnorm(n3, mean = means[3], sd = sd3)
+      
+    } else if (dist == "lognormal") {
+      # mu adjusted for mean and variance
+      mu1 <- log(means[1]) - (sd1^2)/2
+      mu2 <- log(means[2]) - (sd2^2)/2
+      mu3 <- log(means[3]) - (sd3^2)/2
+      
+      s1 <- rlnorm(n1, mu1, sd1)
+      s2 <- rlnorm(n2, mu2, sd2)
+      s3 <- rlnorm(n3, mu3, sd3)
+      
+    } else if (dist == "t") {
+      s1 <- (rt(n1, 3) / sqrt(3)) * sd1 + means[1]
+      s2 <- (rt(n2, 3) / sqrt(3)) * sd2 + means[2]
+      s3 <- (rt(n3, 3) / sqrt(3)) * sd3 + means[3]
+    }
+    
+    values <- c(s1, s2, s3)
+    
+    # 2. Optimized testing
+    p_vals[i, ] <- run_tests_fast(values, groups)
+    
+    # Progress bar
+    if(i %% 1000 == 0) cat("  Done:", i, "iterations\n")
+  }
+  
+  colnames(p_vals) <- c("Classic", "Welch", "Brown-Forsythe", "Permutation")
+  return(colMeans(p_vals < 0.05, na.rm = TRUE))
+}
+
+
+# Power wrapper for Normal distribution
+
+evaluate_normal_power <- function(n_sim = 5000) {
+  list(
+    Balanced_Equal     = simulate_power_fast(20, 20, 20, sqrt(1), sqrt(1), sqrt(1), c(0, 0.5, 1), "normal", n_sim),
+    Unbalanced_Unequal = simulate_power_fast(10, 20, 30, sqrt(1), sqrt(4), sqrt(9), c(0, 0.5, 1), "normal", n_sim),
+    Balanced_Unequal   = simulate_power_fast(15, 15, 15, sqrt(1), sqrt(4), sqrt(9), c(0, 0.5, 1), "normal", n_sim),
+    Unbalanced_Equal   = simulate_power_fast(5, 10, 15, sqrt(1), sqrt(1), sqrt(1), c(0, 0.5, 1), "normal", n_sim)
+  )
+}
+
+evaluate_lognormal_power <- function(n_sim = 5000) {
+  list(
+    Balanced_Equal     = simulate_power_fast(20, 20, 20, sqrt(1), sqrt(1), sqrt(1), c(5, 6, 7), "lognormal", n_sim),
+    Unbalanced_Unequal = simulate_power_fast(10, 20, 30, sqrt(0.5), sqrt(1), sqrt(1.5), c(5, 6, 7), "lognormal", n_sim),
+    Balanced_Unequal   = simulate_power_fast(15, 15, 15, sqrt(0.5), sqrt(1), sqrt(1.5), c(5, 6, 7), "lognormal", n_sim),
+    Unbalanced_Equal   = simulate_power_fast(5, 10, 15, sqrt(1), sqrt(1), sqrt(1), c(5, 6, 7), "lognormal", n_sim)
+  )
+}
+
+evaluate_t_power <- function(n_sim = 5000) {
+  list(
+    Balanced_Equal     = simulate_power_fast(20, 20, 20, sqrt(1), sqrt(1), sqrt(1), c(0, 0.5, 1), "t", n_sim),
+    Unbalanced_Unequal = simulate_power_fast(10, 20, 30, sqrt(1), sqrt(4), sqrt(9), c(0, 0.5, 1), "t", n_sim),
+    Balanced_Unequal   = simulate_power_fast(15, 15, 15, sqrt(1), sqrt(4), sqrt(9), c(0, 0.5, 1), "t", n_sim),
+    Unbalanced_Equal   = simulate_power_fast(5, 10, 15, sqrt(1), sqrt(1), sqrt(1), c(0, 0.5, 1), "t", n_sim)
+  )
+}
+
+```
+
+
+```{r}
+# Normal distribution power
+# Execute and time the Normal power analysis
+system.time({
+  final_n_power_results <- evaluate_normal_power(5000)
+})
+
+# Display results
+print(as.data.frame(final_n_power_results))
+```
+
+
+```{r}
+
+# Lognormal distribution power
+# Execute and time the logNormal power analysis
+system.time({
+  final_ln_power_results <- evaluate_lognormal_power(5000)
+})
+
+# Display results
+print(as.data.frame(final_ln_power_results))
+```
+
+
+```{r}
+# t-distribution power
+# Execute and time the t power analysis
+system.time({
+  final_t_power_results <- evaluate_t_power(5000)
+})
+
+# Display results
+print(as.data.frame(final_t_power_results))
+```
+
+
+
+
+```{r}
+#creating a statistical Power plot for the Normal
+
+# Create a data frame of your results : Normal
+# Combine power results correctly
+
+normal_power_results <- final_n_power_results
+power_normal <- data.frame(
+  Scenario = c("Balanced Equal Var","Unbalanced Unequal Var","Balanced Unequal Var","Unbalanced Equal Var"),
+  rbind(normal_power_results$Balanced_Equal,
+        normal_power_results$Unbalanced_Unequal,
+        normal_power_results$Balanced_Unequal,
+        normal_power_results$Unbalanced_Equal)
+)
+
+# Rename columns PROPERLY
+colnames(power_normal)[2:5] <- c("Classic",
+                                 "Welch",
+                                 "Brown-Forsythe",
+                                 "Permutation")
+
+cat("The power rates for Normal are as follows\n")
+print(power_normal)
+
+# Now pivot
+power_normal_long <- pivot_longer(
+  power_normal,
+  cols = c("Classic", "Welch", "Brown-Forsythe", "Permutation"),
+  names_to = "Method",
+  values_to = "Power"
+)
+# bars should reflect the given order
+power_normal_long$Method <- factor(power_normal_long$Method,
+                                   levels = c("Classic", "Welch", "Brown-Forsythe", "Permutation"))
+
+
+# Fix scenario order
+power_normal_long$Scenario <- factor(
+  power_normal_long$Scenario,
+  levels = c("Balanced Equal Var","Unbalanced Unequal Var","Balanced Unequal Var","Unbalanced Equal Var")
+)
+
+```
+
+
+```{r}
+# Create a data frame of your results : logNormal
+
+# Combine power results correctly
+
+normal_ln_power_results <- final_ln_power_results
+power_normal_ln <- data.frame(
+  Scenario =c("Balanced Equal Var","Unbalanced Unequal Var","Balanced Unequal Var","Unbalanced Equal Var"),
+  rbind(normal_ln_power_results$Balanced_Equal,
+        normal_ln_power_results$Unbalanced_Unequal,
+        normal_ln_power_results$Balanced_Unequal,
+        normal_ln_power_results$Unbalanced_Equal)
+)
+
+# Rename columns PROPERLY
+colnames(power_normal_ln)[2:5] <- c("Classic",
+                                 "Welch",
+                                 "Brown-Forsythe",
+                                 "Permutation")
+
+cat("The power rates for LogNormal are as follows\n")
+print(power_normal_ln)
+
+# Now pivot
+power_normal_ln_long <- pivot_longer(
+  power_normal_ln,
+  cols = c("Classic", "Welch", "Brown-Forsythe", "Permutation"),
+  names_to = "Method",
+  values_to = "Power"
+)
+# bars should reflect the given order
+power_normal_ln_long$Method <- factor(power_normal_ln_long$Method,
+                                      levels = c("Classic", "Welch", "Brown-Forsythe", "Permutation"))
+
+# Fix scenario order
+power_normal_ln_long$Scenario <- factor(
+  power_normal_ln_long$Scenario,
+  levels = c("Balanced Equal Var","Unbalanced Unequal Var","Balanced Unequal Var","Unbalanced Equal Var")
+)
+
+```
+
+
+```{r}
+#creating a statistical Power plot for t
+# Create a data frame of your results : t
+
+# Combine power results correctly
+t_power_results <- final_t_power_results
+power_t <- data.frame(
+  Scenario = c("Balanced Equal Var","Unbalanced Unequal Var","Balanced Unequal Var","Unbalanced Equal Var"),
+  rbind(t_power_results$Balanced_Equal,
+        t_power_results$Unbalanced_Unequal,
+        t_power_results$Balanced_Unequal,
+        t_power_results$Unbalanced_Equal)
+)
+
+# Rename columns PROPERLY
+colnames(power_t)[2:5] <- c("Classic",
+                                 "Welch",
+                                 "Brown-Forsythe",
+                                 "Permutation")
+
+cat("The power rates for t are as follows\n")
+print(power_t)
+
+# Now pivot
+power_t_long <- pivot_longer(
+  power_t,
+  cols = c("Classic", "Welch", "Brown-Forsythe", "Permutation"),
+  names_to = "Method",
+  values_to = "Power"
+)
+# bars should reflect the given order
+power_t_long$Method <- factor(power_t_long$Method,
+                              levels = c("Classic", "Welch", "Brown-Forsythe", "Permutation"))
+# Fix scenario order
+power_t_long$Scenario <- factor(
+  power_t_long$Scenario,
+  levels = c("Balanced Equal Var","Unbalanced Unequal Var","Balanced Unequal Var","Unbalanced Equal Var")
+)
+
+```
+
+
+```{r}
+# Plot1 for normal
+power_plot1<-ggplot(power_normal_long, aes(x = Scenario, y = Power, fill = Method)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.9)) +
+  geom_hline(yintercept = 0.80, linetype = "dashed", color = "red", size = 1, ) +
+   scale_y_continuous(expand = expansion(mult = c(0, 0.1)), limits = c(0, 1)) +  
+  annotate(geom = "label",x=4.2,y=0.82,label="Target Power=0.80", color="red", size=3)+
+  labs(title = "Comparison Statistical Power for normal",
+       subtitle = "Across ANOVA Methods Under Different Conditions",
+       y = "Statistical Power", x = "Design Scenario") +
+  
+ 
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.4, size = 9, color="blue3",vjust = 1),
+        plot.title = element_text(face = "bold", size=16, hjust = 0.5),
+        plot.subtitle = element_text(size = 14, hjust=0.5),
+        axis.title.x = element_text(size=16),
+        axis.title.y = element_text(size=16),
+        legend.position = "top")
+ggsave("power_normal.tiff",power_plot1)
+power_plot1
+
+
+#plot 2 for lognormal
+power_plot2<-ggplot(power_normal_ln_long, aes(x = Scenario, y = Power, fill = Method)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.9)) +
+  geom_hline(yintercept = 0.80, linetype = "dashed", color = "red", size = 1, ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)), limits = c(0, 1)) +  
+  annotate(geom = "label",x=4.2,y=0.82,label="Target Power=0.80", color="red", size=3)+
+  labs(title = "Comparison Statistical Power for Lognormal",
+       subtitle = "Across ANOVA Methods Under Different Conditions",
+      y = "Statistical Power", x = "Design Scenario") +
+ 
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5, size = 9, color="blue3",vjust = 1),
+        plot.title = element_text(face = "bold", size=16, hjust = 0.5),
+        plot.subtitle = element_text(size = 14, hjust=0.5),
+        axis.title.x = element_text(size=16),
+        axis.title.y = element_text(size=16),
+        legend.position = "top")
+ggsave("power_lognormal.tiff",power_plot2)
+power_plot2
+
+#plot 3 for t distribution
+power_plot3<-ggplot(power_t_long, aes(x = Scenario, y = Power, fill = Method)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.9)) +
+  geom_hline(yintercept = 0.80, linetype = "dashed", color = "red", size = 1, ) +
+   scale_y_continuous(expand = expansion(mult = c(0, 0.1)), limits = c(0, 1)) + 
+  annotate(geom = "label",x=4.2,y=0.82,label="Target Power=0.80", color="red", size=3)+
+  labs(title = "Comparison Statistical Power for t",
+       subtitle = "Across ANOVA Methods Under Different Conditions",
+       y = "Statistical Power", x = "Design Scenario") +
+  
+ 
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5, size = 9, color="blue3",vjust = 1),
+        plot.title = element_text(face = "bold", size=16, hjust = 0.5),
+        plot.subtitle = element_text(size = 14, hjust=0.5),
+        axis.title.x = element_text(size=16),
+        axis.title.y = element_text(size=16),
+        legend.position = "top")
+ggsave("power_t.tiff",power_plot3)
+power_plot3
+
+```
+end of simulation
+
+
+
+
+
+
+
+
+
+
+
