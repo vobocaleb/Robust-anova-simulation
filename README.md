@@ -2,7 +2,8 @@
 
 This repository contains the R code used in the simulation study:
 
-“Comparative Performance of Heteroscedasticity-Robust ANOVA Methods: A Simulation Study of Welch, Brown–Forsythe, and Permutation Tests.”
+“Comparative Performance of Heteroscedasticity-Robust ANOVA Methods: Practical Insights from a Simulation Study of Welch, Brown–Forsythe, and Permutation Tests.
+”
 
 
 Overview
@@ -25,12 +26,15 @@ under varying conditions:
 
 Simulation Design
 	•	Number of groups: k = 3
-	•	Sample size configurations: (20, 20, 20), (10, 20, 30), (15, 15, 15)
-	•	Variance structures: (1,1,1), (1,2,3), (1,4,9)
+	•	Sample size configurations: (20, 20, 20), (10, 20, 30), (5, 10, 15)
+	•	Variance structures: (1,1,1) , (1,4,9)
 	•	Distributions: Normal, Lognormal, and t
 	•	Number of simulations: 5000
 
 Power analysis is conducted by introducing mean differences: (0, 0.5, 1)
+For the lognormal distribution, the means are (5, 6, 7) to maintain positive values.
+Differences are distribution-specific: (0, 0.5,1) for normal and *t*-distributions, and (5, 6,
+7) for the lognormal.
 
 
 How to Run the Code
